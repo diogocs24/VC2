@@ -1,4 +1,6 @@
-data/
+images/
+
+annotations.json
 
 
 # Byte-compiled / optimized / DLL files
