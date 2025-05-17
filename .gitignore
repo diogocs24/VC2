@@ -1,5 +1,7 @@
 images/
 
+*.pth
+
 annotations.json
 
 
