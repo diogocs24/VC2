@@ -22,6 +22,8 @@ from torchvision.models.detection import maskrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.transforms import v2 as transforms
+from torch.amp import autocast, GradScaler
+
 
 
 
@@ -29,7 +31,7 @@ random.seed(42)
 
 data_aug = transforms.Compose([
     transforms.ToImage(),    
-    transforms.Resize((256, 256)),
+    transforms.Resize((192, 192)),
     #transforms.CenterCrop((224, 224)),
     #transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
@@ -39,7 +41,7 @@ data_aug = transforms.Compose([
 
 data_in = transforms.Compose([
     transforms.ToImage(),
-    transforms.Resize((256, 256)),
+    transforms.Resize((192, 192)),
     #transforms.CenterCrop((224, 224)),
     transforms.ToDtype(torch.float32, scale=True),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
@@ -50,6 +52,7 @@ data_in = transforms.Compose([
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using {device} device")
 
+scaler = GradScaler(device=device)
 
 class CocoBoardDataset(Dataset):
     def __init__(self, root_dir, partition, transform=None):
@@ -140,7 +143,7 @@ if __name__ == "__main__":
     print("Running the script...")
 
     root_dir = ''
-    batch_size = 8
+    batch_size = 2
     num_workers = 4
     print(f"Using device: {device}")
 
@@ -160,12 +163,16 @@ if __name__ == "__main__":
     hidden_layer = 256
     model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, hidden_layer, 2)
 
+    # Freeze backbone
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
     model.to(device)
 
     # Optimizer
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=2.5e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
     # === Training loop
     num_epochs = 50
@@ -189,12 +196,15 @@ if __name__ == "__main__":
             images = list(img.to(device) for img in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            loss_dict = model(images, targets)
-            loss = sum(loss for loss in loss_dict.values())
-
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+
+            with autocast(device_type=device.type):
+                loss_dict = model(images, targets)
+                loss = sum(loss for loss in loss_dict.values())
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item() * len(images)
 
@@ -203,29 +213,46 @@ if __name__ == "__main__":
         ##########################
         # VALIDATION LOOP
         ##########################
-        model.eval()
+        model.train()
         val_loss = 0.0
         val_iou = 0.0
 
         with torch.no_grad():
-            for images, targets in tqdm(valid_dataloader_board, desc=f"Epoch {epoch+1}/{num_epochs} [Validation]"):
+            for images, targets in tqdm(valid_dataloader_board, desc=f"Epoch {epoch+1}/{num_epochs} [Validation - Loss]"):
                 images = list(img.to(device) for img in images)
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
+                # Get loss_dict → must be in train mode
                 loss_dict = model(images, targets)
                 loss = sum(loss for loss in loss_dict.values())
 
                 val_loss += loss.item() * len(images)
 
-                batch_ious = []
+        # Second step → now switch to eval to get predictions for IoU
+        model.eval()
+        with torch.no_grad():
+            for images, targets in tqdm(valid_dataloader_board, desc=f"Epoch {epoch+1}/{num_epochs} [Validation - IoU]"):
+                images = list(img.to(device) for img in images)
+                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
                 preds = model(images)
+
+                batch_ious = []
                 for pred, target in zip(preds, targets):
                     if len(pred["masks"]) == 0:
                         continue
-                    pred_mask = (pred["masks"][0, 0] > 0.5).cpu().int()
+                    # Optional: use largest mask if multiple
+                    if len(pred["masks"]) > 1:
+                        areas = [(m[0] > 0.5).sum().item() for m in pred["masks"]]
+                        max_idx = np.argmax(areas)
+                        pred_mask = (pred["masks"][max_idx, 0] > 0.5).cpu().int()
+                    else:
+                        pred_mask = (pred["masks"][0, 0] > 0.5).cpu().int()
+
                     gt_mask = (target["masks"][0] > 0.5).cpu().int()
                     iou = compute_iou(pred_mask, gt_mask)
                     batch_ious.append(iou)
+
                 if len(batch_ious) > 0:
                     val_iou += np.mean(batch_ious) * len(images)
 
