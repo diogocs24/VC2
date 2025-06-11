@@ -1,5 +1,7 @@
 images2/
 images/
+yolo_dataset/
+exp10-new/
 
 *.pth
 

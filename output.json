@@ -1,10 +1,22 @@
 [
     {
         "image": "images/0/G000_IMG089.jpg",
-        "num_pieces": 11
+        "num_pieces": 10
     },
     {
         "image": "images/0/G000_IMG100.jpg",
         "num_pieces": 8
+    },
+    {
+        "image": "images/0/G000_IMG000.jpg",
+        "num_pieces": 32
+    },
+    {
+        "image": "images/0/G000_IMG034.jpg",
+        "num_pieces": 26
+    },
+    {
+        "image": "images/76/G076_IMG044.jpg",
+        "num_pieces": 22
     }
 ]
